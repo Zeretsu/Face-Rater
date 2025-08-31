@@ -1,41 +1,116 @@
 {
-  "name": "face-rater",
+  "name": "face-beauty-analyzer",
   "version": "1.0.0",
-  "description": "",
+  "description": "Advanced AI-powered facial beauty analysis application",
   "main": "main.js",
+  "author": "Face Beauty Analyzer Team",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "start": "electron .",
-    "build": "vite build && electron-builder"
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "electron-dev": "cross-env NODE_ENV=development electron .",
+    "start": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && npm run electron-dev\"",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "postinstall": "electron-builder install-app-deps"
   },
   "build": {
-    "appId": "com.facebeauty.app",
+    "appId": "com.facebeauty.analyzer",
     "productName": "Face Beauty Analyzer",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*",
       "main.js",
       "preload.js",
-      "package.json"
+      "package.json",
+      "assets/**/*"
     ],
+    "mac": {
+      "category": "public.app-category.photography",
+      "icon": "assets/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist"
+    },
     "win": {
-      "target": "nsis"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Graphics"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
     }
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@tensorflow-models/face-landmarks-detection": "^1.0.6",
     "@tensorflow/tfjs": "^4.22.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^5.0.2",
-    "concurrently": "^9.2.1",
-    "electron": "^37.4.0",
-    "electron-builder": "^26.0.12",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.0.0",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "electron-reload": "^2.0.0-alpha.1",
     "vite": "^7.1.3",
-    "wait-on": "^8.0.4"
-  }
+    "wait-on": "^7.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/face-beauty-analyzer"
+  },
+  "keywords": [
+    "face",
+    "beauty",
+    "analysis",
+    "ai",
+    "tensorflow",
+    "electron",
+    "react"
+  ]
 }

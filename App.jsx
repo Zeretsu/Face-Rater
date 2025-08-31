@@ -1,169 +1,387 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import * as tf from '@tensorflow/tfjs';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection';
+import './App.css';
 
+const App = () => {
+    const [isModelLoaded, setIsModelLoaded] = useState(false);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [analysisResult, setAnalysisResult] = useState(null);
+    const [selectedImage, setSelectedImage] = useState(null);
+    const [errorMessage, setErrorMessage] = useState('');
+    const [detector, setDetector] = useState(null);
+    const [isDragging, setIsDragging] = useState(false);
 
-// Landmark indices for face parts
-const LM = {
-    leftEye: [33, 133, 159, 145, 153, 144],
-    rightEye: [362, 263, 386, 374, 380, 373],
-    leftInner: 133, rightInner: 362,
-    leftOuter: 33, rightOuter: 263,
-    noseBridgeTop: 168, noseTip: 1, noseLeft: 97, noseRight: 326,
-    chin: 152, faceLeft: 234, faceRight: 454,
-    browLeftMid: 55, browRightMid: 285
-};
-
-// Utility functions
-function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
-function meanPoint(points) { const n = points.length; const s = points.reduce((acc, p) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]); return [s[0] / n, s[1] / n]; }
-function getPts(landmarks, idxs) { return idxs.map(i => [landmarks[i].x, landmarks[i].y]); }
-function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-function scoreFromError(err, tolerance = 0.1) { return clamp(100 * Math.exp(-(err * err) / (2 * tolerance * tolerance)), 0, 100); }
-
-// Compute face metrics
-function computeMetrics(landmarks) {
-    const pts = landmarks.map(p => [p.x, p.y]);
-    const leftEyePts = getPts(landmarks, LM.leftEye);
-    const rightEyePts = getPts(landmarks, LM.rightEye);
-    const leftEyeCenter = meanPoint(leftEyePts);
-    const rightEyeCenter = meanPoint(rightEyePts);
-    const eyeCenterMid = [(leftEyeCenter[0] + rightEyeCenter[0]) / 2, (leftEyeCenter[1] + rightEyeCenter[1]) / 2];
-    const faceLeft = [landmarks[LM.faceLeft].x, landmarks[LM.faceLeft].y];
-    const faceRight = [landmarks[LM.faceRight].x, landmarks[LM.faceRight].y];
-    const faceWidth = dist(faceLeft, faceRight);
-    const chin = [landmarks[LM.chin].x, landmarks[LM.chin].y];
-    const noseBridgeTop = [landmarks[LM.noseBridgeTop].x, landmarks[LM.noseBridgeTop].y];
-    const faceLength = dist(noseBridgeTop, chin) * 1.4;
-    const midlineX = eyeCenterMid[0];
-
-    // Symmetry
-    const pairs = [[LM.leftOuter, LM.rightOuter], [LM.leftInner, LM.rightInner], [LM.browLeftMid, LM.browRightMid], [LM.noseLeft, LM.noseRight]];
-    const symErrs = pairs.map(([l, r]) => {
-        const L = [landmarks[l].x, landmarks[l].y];
-        const R = [landmarks[r].x, landmarks[r].y];
-        const Rm = [2 * midlineX - R[0], R[1]];
-        return dist(L, Rm);
-    });
-    const symmetryErr = symErrs.reduce((a, b) => a + b, 0) / symErrs.length;
-    const symmetryNorm = symmetryErr / (faceWidth || 1e-6);
-    const symmetryScore = scoreFromError(symmetryNorm, 0.04);
-
-    // Golden ratio
-    const lw = faceLength / (faceWidth || 1e-6);
-    const goldenTarget = 1.618;
-    const goldenErr = Math.abs(lw - goldenTarget) / goldenTarget;
-    const goldenScore = scoreFromError(goldenErr, 0.15);
-
-    // Rule of Fifths
-    const leftEyeW = dist([landmarks[LM.leftOuter].x, landmarks[LM.leftInner].y], [landmarks[LM.leftInner].x, landmarks[LM.leftInner].y]);
-    const rightEyeW = dist([landmarks[LM.rightInner].x, landmarks[LM.rightOuter].y], [landmarks[LM.rightOuter].x, landmarks[LM.rightOuter].y]);
-    const eyeW = (leftEyeW + rightEyeW) / 2;
-    const fifths = (faceWidth || 1e-6) / (eyeW || 1e-6);
-    const fifthsErr = Math.abs(fifths - 5) / 5;
-    const fifthsScore = scoreFromError(fifthsErr, 0.18);
-
-    // Eye gap
-    const innerGap = dist([landmarks[LM.leftInner].x, landmarks[LM.leftInner].y], [landmarks[LM.rightInner].x, landmarks[LM.rightInner].y]);
-    const eyeGapRatio = innerGap / (eyeW || 1e-6);
-    const eyeGapErr = Math.abs(eyeGapRatio - 1);
-    const eyeGapScore = scoreFromError(eyeGapErr, 0.25);
-
-    return { symmetryScore, goldenScore, fifthsScore, eyeGapScore, raw: { lw, fifths, eyeGapRatio, symmetryNorm } };
-}
-
-function weightedScore(metrics, weights) {
-    const { symmetryScore, goldenScore, fifthsScore, eyeGapScore } = metrics;
-    const wSum = Object.values(weights).reduce((a, b) => a + b, 0) || 1;
-    return (symmetryScore * weights.symmetry + goldenScore * weights.golden + fifthsScore * weights.fifths + eyeGapScore * weights.eyeGap) / wSum;
-}
-
-export default function App() {
-    const [model, setModel] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [imgSrc, setImgSrc] = useState(null);
-    const [metrics, setMetrics] = useState(null);
-    const [score, setScore] = useState(null);
-    const [weights] = useState({ symmetry: 40, golden: 25, fifths: 20, eyeGap: 15 });
+    const fileInputRef = useRef(null);
     const canvasRef = useRef(null);
-    const imgRef = useRef(null);
+    const imageRef = useRef(null);
 
+    // Initialize face detection model
     useEffect(() => {
-        let mounted = true;
-        (async () => {
-            setLoading(true);
-            await tf.setBackend('webgl');
-            const m = await faceLandmarksDetection.load(faceLandmarksDetection.SupportedPackages.mediapipeFacemesh, { maxFaces: 1, shouldLoadIrisModel: true });
-            if (mounted) setModel(m);
-            setLoading(false);
-        })();
-        return () => { mounted = false };
+        const loadModel = async () => {
+            try {
+                await tf.ready();
+                const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
+                const detectorConfig = {
+                    runtime: 'tfjs',
+                    refineLandmarks: true,
+                    maxFaces: 1,
+                };
+                const detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+                setDetector(detector);
+                setIsModelLoaded(true);
+            } catch (error) {
+                console.error('Error loading model:', error);
+                setErrorMessage('Failed to load face detection model. Please refresh the page.');
+            }
+        };
+        loadModel();
     }, []);
 
-    const handleFile = (file) => {
-        if (!file) return;
-        setImgSrc(URL.createObjectURL(file));
-        setMetrics(null);
-        setScore(null);
+    // Calculate facial proportions and symmetry
+    const calculateFacialMetrics = (landmarks) => {
+        // Key facial landmarks indices for MediaPipe Face Mesh
+        const leftEye = landmarks[33];
+        const rightEye = landmarks[263];
+        const noseTip = landmarks[1];
+        const leftMouth = landmarks[61];
+        const rightMouth = landmarks[291];
+        const chin = landmarks[152];
+        const forehead = landmarks[10];
+        const leftCheek = landmarks[234];
+        const rightCheek = landmarks[454];
+
+        // Calculate distances
+        const eyeDistance = Math.sqrt(
+            Math.pow(rightEye.x - leftEye.x, 2) +
+            Math.pow(rightEye.y - leftEye.y, 2)
+        );
+
+        const faceHeight = Math.sqrt(
+            Math.pow(chin.x - forehead.x, 2) +
+            Math.pow(chin.y - forehead.y, 2)
+        );
+
+        const faceWidth = Math.sqrt(
+            Math.pow(rightCheek.x - leftCheek.x, 2) +
+            Math.pow(rightCheek.y - leftCheek.y, 2)
+        );
+
+        const mouthWidth = Math.sqrt(
+            Math.pow(rightMouth.x - leftMouth.x, 2) +
+            Math.pow(rightMouth.y - leftMouth.y, 2)
+        );
+
+        // Golden ratio calculations
+        const goldenRatio = 1.618;
+        const faceRatio = faceHeight / faceWidth;
+        const eyeToMouthRatio = eyeDistance / mouthWidth;
+
+        // Symmetry calculations
+        const leftEyeToNose = Math.sqrt(
+            Math.pow(leftEye.x - noseTip.x, 2) +
+            Math.pow(leftEye.y - noseTip.y, 2)
+        );
+        const rightEyeToNose = Math.sqrt(
+            Math.pow(rightEye.x - noseTip.x, 2) +
+            Math.pow(rightEye.y - noseTip.y, 2)
+        );
+        const symmetryScore = 1 - Math.abs(leftEyeToNose - rightEyeToNose) / Math.max(leftEyeToNose, rightEyeToNose);
+
+        // Calculate individual scores
+        const proportionScore = Math.max(0, 1 - Math.abs(faceRatio - goldenRatio) / goldenRatio) * 100;
+        const symmetryPercentage = symmetryScore * 100;
+        const harmonyScore = Math.max(0, 1 - Math.abs(eyeToMouthRatio - 1.5) / 1.5) * 100;
+
+        // Calculate overall score (weighted average)
+        const overallScore = (proportionScore * 0.4 + symmetryPercentage * 0.4 + harmonyScore * 0.2);
+
+        return {
+            overallScore: Math.min(95, Math.max(60, overallScore)), // Clamp between 60-95
+            proportions: proportionScore,
+            symmetry: symmetryPercentage,
+            harmony: harmonyScore,
+            faceShape: determineFaceShape(faceRatio),
+            details: {
+                faceRatio: faceRatio.toFixed(2),
+                eyeDistance: eyeDistance.toFixed(0),
+                faceWidth: faceWidth.toFixed(0),
+                faceHeight: faceHeight.toFixed(0)
+            }
+        };
     };
 
-    const analyze = async () => {
-        if (!model || !imgRef.current) return;
-        setLoading(true);
-        try {
-            const preds = await model.estimateFaces({ input: imgRef.current, predictIrises: true, flipHorizontal: false });
-            if (!preds || !preds[0]) { setMetrics(null); setScore(null); setLoading(false); return; }
-            const lm = preds[0].scaledMesh.map(([x, y]) => ({ x, y }));
-            const m = computeMetrics(lm);
-            const s = weightedScore(m, weights);
-            setMetrics(m);
-            setScore(s);
-            draw(lm);
-        } finally { setLoading(false); }
+    const determineFaceShape = (ratio) => {
+        if (ratio < 1.3) return 'Round';
+        if (ratio < 1.5) return 'Square';
+        if (ratio < 1.7) return 'Heart';
+        if (ratio < 1.9) return 'Oval';
+        return 'Oblong';
     };
 
-    const draw = (landmarks) => {
-        const canvas = canvasRef.current;
-        const img = imgRef.current;
-        if (!canvas || !img) return;
-        const ctx = canvas.getContext('2d');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
+    const getScoreColor = (score) => {
+        if (score >= 85) return '#4ade80';
+        if (score >= 75) return '#84cc16';
+        if (score >= 65) return '#facc15';
+        return '#fb923c';
+    };
+
+    const getScoreDescription = (score) => {
+        if (score >= 90) return 'Exceptional facial harmony';
+        if (score >= 85) return 'Outstanding features';
+        if (score >= 80) return 'Very attractive proportions';
+        if (score >= 75) return 'Above average beauty';
+        if (score >= 70) return 'Good facial balance';
+        if (score >= 65) return 'Pleasant features';
+        return 'Unique charm';
+    };
+
+    const drawFaceMesh = (landmarks, canvas, ctx) => {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        // Draw key points
-        ctx.fillStyle = '#22c55e';
-        const idxs = [...LM.leftEye, ...LM.rightEye, LM.leftInner, LM.rightInner, LM.leftOuter, LM.rightOuter, LM.noseTip, LM.noseLeft, LM.noseRight, LM.noseBridgeTop, LM.faceLeft, LM.faceRight, LM.chin, LM.browLeftMid, LM.browRightMid];
-        for (const i of idxs) { const p = landmarks[i]; ctx.beginPath(); ctx.arc(p[0], p[1], 3, 0, Math.PI * 2); ctx.fill(); }
+
+        // Draw face mesh points
+        ctx.fillStyle = 'rgba(74, 222, 128, 0.6)';
+        landmarks.forEach(point => {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 1.5, 0, 2 * Math.PI);
+            ctx.fill();
+        });
+
+        // Draw key feature connections
+        ctx.strokeStyle = 'rgba(74, 222, 128, 0.3)';
+        ctx.lineWidth = 1;
+
+        // Eye connections
+        const eyeIndices = [[33, 133], [263, 362]];
+        eyeIndices.forEach(([start, end]) => {
+            ctx.beginPath();
+            ctx.moveTo(landmarks[start].x, landmarks[start].y);
+            ctx.lineTo(landmarks[end].x, landmarks[end].y);
+            ctx.stroke();
+        });
+    };
+
+    const analyzeImage = async () => {
+        if (!selectedImage || !detector) return;
+
+        setIsAnalyzing(true);
+        setErrorMessage('');
+
+        try {
+            const img = imageRef.current;
+            const faces = await detector.estimateFaces(img);
+
+            if (faces.length === 0) {
+                setErrorMessage('No face detected. Please upload a clear front-facing photo.');
+                setIsAnalyzing(false);
+                return;
+            }
+
+            const face = faces[0];
+            const metrics = calculateFacialMetrics(face.keypoints);
+
+            // Draw face mesh on canvas
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            drawFaceMesh(face.keypoints, canvas, ctx);
+
+            setAnalysisResult(metrics);
+        } catch (error) {
+            console.error('Analysis error:', error);
+            setErrorMessage('Failed to analyze image. Please try another photo.');
+        } finally {
+            setIsAnalyzing(false);
+        }
+    };
+
+    const handleImageUpload = (e) => {
+        const file = e.target.files?.[0] || e.dataTransfer?.files?.[0];
+        if (!file) return;
+
+        if (!file.type.startsWith('image/')) {
+            setErrorMessage('Please upload an image file.');
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            setSelectedImage(e.target.result);
+            setAnalysisResult(null);
+            setErrorMessage('');
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+        setIsDragging(true);
+    };
+
+    const handleDragLeave = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+    };
+
+    const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        handleImageUpload(e);
+    };
+
+    const resetAnalysis = () => {
+        setSelectedImage(null);
+        setAnalysisResult(null);
+        setErrorMessage('');
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
     };
 
     return (
-        <div style={{ padding: 16, fontFamily: 'sans-serif' }}>
-            <h2>Face Geometry & Beauty Score — Desktop</h2>
-            <input type="file" accept="image/*" onChange={(e) => handleFile(e.target.files?.[0])} />
-            <div style={{ marginTop: 8 }}>
-                {imgSrc ? (
-                    <div style={{ position: 'relative', maxHeight: '70vh', overflow: 'auto' }}>
-                        <img ref={imgRef} src={imgSrc} alt="face" style={{ display: 'block', maxWidth: '100%' }} />
-                        <canvas ref={canvasRef} style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }} />
+        <div className="app">
+            <header className="header">
+                <h1 className="title">
+                    <span className="gradient-text">Face Beauty Analyzer</span>
+                </h1>
+                <p className="subtitle">
+                    Advanced facial proportion and symmetry analysis using AI
+                </p>
+            </header>
+
+            <main className="main-content">
+                {!selectedImage ? (
+                    <div
+                        className={`upload-area ${isDragging ? 'dragging' : ''}`}
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                    >
+                        <div className="upload-content">
+                            <svg className="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <polyline points="17 8 12 3 7 8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <line x1="12" y1="3" x2="12" y2="15" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                            <h2>Upload Your Photo</h2>
+                            <p>Drag and drop an image here, or click to browse</p>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/*"
+                                onChange={handleImageUpload}
+                                className="file-input"
+                            />
+                            <button className="upload-button">
+                                Choose Image
+                            </button>
+                        </div>
+                        {!isModelLoaded && (
+                            <div className="loading-model">
+                                <div className="spinner"></div>
+                                <p>Loading AI model...</p>
+                            </div>
+                        )}
                     </div>
-                ) : (<div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888' }}>Upload an image to begin</div>)}
-            </div>
-            <div style={{ marginTop: 12 }}>
-                <button onClick={analyze} disabled={!imgSrc || loading}>{loading ? 'Loading...' : 'Analyze'}</button>
-                <button onClick={() => { setImgSrc(null); setMetrics(null); setScore(null); }}>Reset</button>
-            </div>
-            <div style={{ marginTop: 12 }}>
-                <div><strong>Score:</strong> {score ? score.toFixed(1) : '—'}</div>
-                {metrics && (
-                    <ul>
-                        <li>Symmetry: {metrics.symmetryScore.toFixed(1)}</li>
-                        <li>Length:Width: {metrics.goldenScore.toFixed(1)} (actual {metrics.raw.lw.toFixed(2)})</li>
-                        <li>Rule of Fifths: {metrics.fifthsScore.toFixed(1)} (actual {metrics.raw.fifths.toFixed(2)})</li>
-                        <li>Eye Gap: {metrics.eyeGapScore.toFixed(1)} (actual {metrics.raw.eyeGapRatio.toFixed(2)})</li>
-                    </ul>
+                ) : (
+                    <div className="analysis-container">
+                        <div className="image-section">
+                            <div className="image-wrapper">
+                                <img
+                                    ref={imageRef}
+                                    src={selectedImage}
+                                    alt="Face to analyze"
+                                    onLoad={() => analyzeImage()}
+                                />
+                                <canvas
+                                    ref={canvasRef}
+                                    className="overlay-canvas"
+                                />
+                            </div>
+                            <button onClick={resetAnalysis} className="new-photo-btn">
+                                Upload New Photo
+                            </button>
+                        </div>
+
+                        {isAnalyzing && (
+                            <div className="analyzing">
+                                <div className="spinner"></div>
+                                <p>Analyzing facial features...</p>
+                            </div>
+                        )}
+
+                        {analysisResult && !isAnalyzing && (
+                            <div className="results-section">
+                                <div className="score-card main-score">
+                                    <div className="score-circle" style={{
+                                        background: `conic-gradient(${getScoreColor(analysisResult.overallScore)} ${analysisResult.overallScore * 3.6}deg, #1f2937 0deg)`
+                                    }}>
+                                        <div className="score-inner">
+                                            <span className="score-value">{Math.round(analysisResult.overallScore)}</span>
+                                            <span className="score-label">Overall Score</span>
+                                        </div>
+                                    </div>
+                                    <p className="score-description">{getScoreDescription(analysisResult.overallScore)}</p>
+                                </div>
+
+                                <div className="metrics-grid">
+                                    <div className="metric-card">
+                                        <h3>Proportions</h3>
+                                        <div className="metric-value" style={{ color: getScoreColor(analysisResult.proportions) }}>
+                                            {Math.round(analysisResult.proportions)}%
+                                        </div>
+                                        <p>Golden ratio alignment</p>
+                                    </div>
+                                    <div className="metric-card">
+                                        <h3>Symmetry</h3>
+                                        <div className="metric-value" style={{ color: getScoreColor(analysisResult.symmetry) }}>
+                                            {Math.round(analysisResult.symmetry)}%
+                                        </div>
+                                        <p>Facial balance</p>
+                                    </div>
+                                    <div className="metric-card">
+                                        <h3>Harmony</h3>
+                                        <div className="metric-value" style={{ color: getScoreColor(analysisResult.harmony) }}>
+                                            {Math.round(analysisResult.harmony)}%
+                                        </div>
+                                        <p>Feature coordination</p>
+                                    </div>
+                                </div>
+
+                                <div className="details-card">
+                                    <h3>Face Analysis Details</h3>
+                                    <div className="detail-row">
+                                        <span>Face Shape:</span>
+                                        <span className="detail-value">{analysisResult.faceShape}</span>
+                                    </div>
+                                    <div className="detail-row">
+                                        <span>Face Ratio:</span>
+                                        <span className="detail-value">{analysisResult.details.faceRatio}</span>
+                                    </div>
+                                    <div className="detail-row">
+                                        <span>Ideal Ratio:</span>
+                                        <span className="detail-value">1.618 (Golden Ratio)</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {errorMessage && (
+                            <div className="error-message">
+                                <p>{errorMessage}</p>
+                            </div>
+                        )}
+                    </div>
                 )}
-            </div>
+            </main>
+
+            <footer className="footer">
+                <p>Powered by TensorFlow.js and MediaPipe Face Mesh</p>
+                <p className="disclaimer">For entertainment purposes only. Beauty is subjective and diverse.</p>
+            </footer>
         </div>
     );
-}
+};
+
+export default App;
