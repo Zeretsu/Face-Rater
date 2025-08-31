@@ -4,10 +4,14 @@ const fs = require('fs');
 
 // Enable live reload for Electron in development
 if (process.env.NODE_ENV === 'development') {
-    require('electron-reload')(__dirname, {
-        electron: path.join(__dirname, 'node_modules', '.bin', 'electron'),
-        hardResetMethod: 'exit'
-    });
+    try {
+        require('electron-reload')(__dirname, {
+            electron: path.join(__dirname, 'node_modules', '.bin', 'electron'),
+            hardResetMethod: 'exit'
+        });
+    } catch (e) {
+        console.log('electron-reload not available in production');
+    }
 }
 
 let mainWindow;
@@ -23,7 +27,8 @@ function createWindow() {
         webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            preload: path.join(__dirname, 'preload.js')
+            preload: path.join(__dirname, 'preload.js'),
+            webSecurity: false // Allow loading local files in development
         },
         icon: path.join(__dirname, 'assets', 'icon.png'),
         titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -33,6 +38,7 @@ function createWindow() {
     // Load the app
     if (isDev) {
         mainWindow.loadURL('http://localhost:5173');
+        // Open DevTools in development
         mainWindow.webContents.openDevTools();
     } else {
         mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
@@ -256,3 +262,12 @@ app.on('certificate-error', (event, webContents, url, error, certificate, callba
         callback(false);
     }
 });
+
+// Security: Prevent new window creation
+app.on('web-contents-created', (event, contents) => {
+    contents.on('new-window', (event, navigationUrl) => {
+        event.preventDefault();
+    });
+});
+
+console.log('Electron main process started');

@@ -10,13 +10,7 @@ export default defineConfig({
         outDir: 'dist',
         assetsDir: 'assets',
         sourcemap: false,
-        minify: 'terser',
-        terserOptions: {
-            compress: {
-                drop_console: true,
-                drop_debugger: true
-            }
-        },
+        minify: 'esbuild', // Changed from terser to esbuild for faster builds
         rollupOptions: {
             input: {
                 main: path.resolve(__dirname, 'index.html')
